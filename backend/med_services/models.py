@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
-from django.core.validators import RegexValidator
+from django.core.validators import RegexValidator, FileExtensionValidator, MinValueValidator, MaxValueValidator
 
 
 class UserProfile(models.Model):
@@ -157,6 +157,15 @@ class Consultation(models.Model):
         null=True,
         help_text="AI-generated triage analysis and department suggestion"
     )
+
+    # Optional uploaded report (PDF or image)
+    report_file = models.FileField(
+        upload_to='reports/',
+        blank=True,
+        null=True,
+        validators=[FileExtensionValidator(allowed_extensions=['pdf', 'jpg', 'jpeg', 'png'])],
+        help_text="Optional medical report (PDF or image)"
+    )
     
     # Consultation status
     STATUS_CHOICES = [
@@ -202,3 +211,68 @@ class Consultation(models.Model):
     
     def __str__(self):
         return f"Consultation #{self.id} - {self.user_profile.user.username} with Dr. {self.doctor.name} ({self.get_status_display()})"
+
+
+class DoctorAvailability(models.Model):
+    """
+    Represents a doctor's available time window for booking on a given date.
+    """
+    doctor = models.ForeignKey(
+        ChinaDoctor,
+        on_delete=models.CASCADE,
+        related_name='availabilities',
+        help_text="Doctor this availability belongs to"
+    )
+    date = models.DateField(help_text="Availability date")
+    start_time = models.TimeField(help_text="Start time for availability window")
+    end_time = models.TimeField(help_text="End time for availability window")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['doctor', 'date', 'start_time']
+        verbose_name = 'Doctor Availability'
+        verbose_name_plural = 'Doctor Availabilities'
+        unique_together = ('doctor', 'date', 'start_time', 'end_time')
+
+    def __str__(self):
+        return f"{self.doctor.name} - {self.date} {self.start_time}-{self.end_time}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        # Skip when either time is missing (admin drafts)
+        if not self.start_time or not self.end_time:
+            return
+        # Ensure start is before end
+        if self.end_time <= self.start_time:
+            raise ValidationError("End time must be after start time")
+
+
+class DoctorReview(models.Model):
+    """Review for a completed consultation."""
+
+    consultation = models.OneToOneField(
+        Consultation,
+        on_delete=models.CASCADE,
+        related_name='review',
+        help_text="The consultation this review belongs to"
+    )
+    stars = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Rating stars (1-5)"
+    )
+    comment = models.TextField(
+        blank=True,
+        help_text="Optional review comment"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Doctor Review'
+        verbose_name_plural = 'Doctor Reviews'
+
+    def __str__(self):
+        return f"Review for Consultation #{self.consultation.id}"

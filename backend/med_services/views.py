@@ -1,34 +1,77 @@
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny, BasePermission
 from rest_framework import generics
-from rest_framework.authtoken.models import Token
-from rest_framework.authtoken.serializers import AuthTokenSerializer
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.exceptions import PermissionDenied
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.shortcuts import get_object_or_404
 
-from .models import UserProfile, ChinaDoctor, Consultation
+from .models import UserProfile, ChinaDoctor, Consultation, DoctorAvailability, DoctorReview
 from .serializers import (
     UserProfileSerializer,
     ChinaDoctorSerializer,
     ConsultationSerializer,
     AITriageRequestSerializer,
-    AITriageResponseSerializer
+    AITriageResponseSerializer,
+    RegisterSerializer,
+    DoctorAvailabilitySerializer,
+    DoctorReviewSerializer
 )
 
 
-class LoginView(APIView):
-    """Token-based login: exchange username/password for a token."""
-    permission_classes = [AllowAny]
+class IsOwnerOrAdmin(BasePermission):
+    """
+    Custom permission: Users can only access their own data, admins can access all.
+    """
+    def has_object_permission(self, request, view, obj):
+        # Admin users have full access
+        if request.user and request.user.is_staff:
+            return True
+        
+        # For UserProfile objects
+        if isinstance(obj, UserProfile):
+            return obj.user == request.user
+        
+        # For Consultation objects
+        if isinstance(obj, Consultation):
+            return obj.user_profile.user == request.user
+        
+        return False
 
+
+class RegisterView(APIView):
+    """
+    User registration endpoint.
+    Creates User and automatically links UserProfile, returns JWT tokens.
+    
+    POST /api/auth/register/
+    Body: {username, password, email, phone, language_preference}
+    Response: {user: {...}, access: "...", refresh: "..."}
+    """
+    permission_classes = [AllowAny]
+    
     def post(self, request):
-        serializer = AuthTokenSerializer(data=request.data)
+        serializer = RegisterSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        user = serializer.validated_data['user']
-        token, _ = Token.objects.get_or_create(user=user)
-        return Response({'token': token.key}, status=status.HTTP_200_OK)
+        
+        # Create user and profile
+        user = serializer.save()
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+            },
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+        }, status=status.HTTP_201_CREATED)
 
 
 class AITriageView(APIView):
@@ -187,7 +230,7 @@ class UserProfileDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     queryset = UserProfile.objects.all()
     serializer_class = UserProfileSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsOwnerOrAdmin]
 
 
 class ChinaDoctorListView(generics.ListAPIView):
@@ -238,16 +281,21 @@ class ConsultationListCreateView(generics.ListCreateAPIView):
     """
     List all consultations or create a new consultation.
     
-    GET: List all consultations (filtered by authenticated user)
+    GET: List all consultations (filtered by authenticated user, admins see all)
     POST: Create a new consultation
     """
     serializer_class = ConsultationSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
     
     def get_queryset(self):
         """
         Return consultations for the authenticated user only.
+        Admins can see all consultations.
         """
+        if self.request.user.is_staff:
+            return Consultation.objects.all()
+        
         user_profile = get_object_or_404(UserProfile, user=self.request.user)
         return Consultation.objects.filter(user_profile=user_profile)
     
@@ -255,7 +303,6 @@ class ConsultationListCreateView(generics.ListCreateAPIView):
         """
         Create consultation with additional context.
         """
-        # You can add additional logic here, such as sending notifications
         serializer.save()
 
 
@@ -268,11 +315,85 @@ class ConsultationDetailView(generics.RetrieveUpdateDestroyAPIView):
     DELETE: Cancel/delete consultation
     """
     serializer_class = ConsultationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsOwnerOrAdmin]
     
     def get_queryset(self):
         """
         Return consultations for the authenticated user only.
+        Admins can access all consultations.
         """
+        if self.request.user.is_staff:
+            return Consultation.objects.all()
+        
         user_profile = get_object_or_404(UserProfile, user=self.request.user)
         return Consultation.objects.filter(user_profile=user_profile)
+
+
+class ConsultationStatusUpdateView(APIView):
+    """
+    Update consultation status (pending -> confirmed/cancelled; confirmed -> completed/cancelled).
+    Only the assigned doctor (staff) or admins can update.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        consultation = get_object_or_404(Consultation, pk=pk)
+
+        # Permission: allow staff/admin only (doctor accounts assumed as staff)
+        if not request.user.is_staff:
+            return Response({'error': 'Only doctor or admin can update status'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ConsultationSerializer(
+            consultation,
+            data={'status': request.data.get('status')},
+            partial=True,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        # Mock notification when confirmed
+        if serializer.instance.status == 'confirmed':
+            user = serializer.instance.user_profile.user
+            scheduled = serializer.instance.scheduled_at
+            print(f"[Mock Notification] Consultation confirmed for user={user.username}, time={scheduled}")
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ConsultationReviewCreateView(generics.CreateAPIView):
+    """
+    Create a doctor review for a completed consultation.
+    Only the consultation owner or admin can submit.
+    """
+    serializer_class = DoctorReviewSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_consultation(self):
+        return get_object_or_404(Consultation, pk=self.kwargs.get('pk'))
+
+    def perform_create(self, serializer):
+        consultation = self.get_consultation()
+        if not self.request.user.is_staff and consultation.user_profile.user != self.request.user:
+            raise PermissionDenied('You cannot review another user consultation')
+        serializer.save(consultation=consultation)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['consultation'] = self.get_consultation()
+        return context
+
+
+class DoctorAvailabilityListView(generics.ListAPIView):
+    """
+    List available time slots for doctors. Supports filtering by doctor_id.
+    """
+    serializer_class = DoctorAvailabilitySerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        queryset = DoctorAvailability.objects.all()
+        doctor_id = self.request.query_params.get('doctor_id')
+        if doctor_id:
+            queryset = queryset.filter(doctor_id=doctor_id)
+        return queryset.order_by('date', 'start_time')

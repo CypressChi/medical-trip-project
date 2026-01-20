@@ -1,6 +1,20 @@
 from django.contrib import admin
 from django import forms
-from .models import UserProfile, ChinaDoctor, Consultation
+from .models import UserProfile, ChinaDoctor, Consultation, DoctorAvailability, DoctorReview
+
+
+class DoctorAvailabilityForm(forms.ModelForm):
+    """Custom form to allow hour-only input like '17' for time fields."""
+
+    class Meta:
+        model = DoctorAvailability
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        input_formats = ['%H:%M', '%H:%M:%S', '%H']
+        self.fields['start_time'].input_formats = input_formats
+        self.fields['end_time'].input_formats = input_formats
 
 
 @admin.register(UserProfile)
@@ -51,7 +65,7 @@ class ConsultationAdmin(admin.ModelAdmin):
     # Fieldset layout - ai_suggestion is editable here (not in readonly_fields)
     fieldsets = (
         ('Consultation Details', {
-            'fields': ('user_profile', 'doctor', 'symptoms_description')
+            'fields': ('user_profile', 'doctor', 'symptoms_description', 'report_file')
         }),
         ('AI Analysis', {
             'fields': ('ai_suggestion',),
@@ -78,3 +92,21 @@ class ConsultationAdmin(admin.ModelAdmin):
     
     patient.short_description = "Patient"
     doctor.short_description = "Doctor"
+
+
+@admin.register(DoctorAvailability)
+class DoctorAvailabilityAdmin(admin.ModelAdmin):
+    """Admin interface for DoctorAvailability model."""
+    form = DoctorAvailabilityForm
+    list_display = ['doctor', 'date', 'start_time', 'end_time', 'created_at']
+    list_filter = ['doctor', 'date']
+    search_fields = ['doctor__name', 'doctor__hospital']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(DoctorReview)
+class DoctorReviewAdmin(admin.ModelAdmin):
+    """Admin interface for DoctorReview model."""
+    list_display = ['consultation', 'stars', 'created_at']
+    search_fields = ['consultation__id', 'consultation__doctor__name']
+    readonly_fields = ['created_at', 'updated_at']
