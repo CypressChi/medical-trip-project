@@ -3,6 +3,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import generics
+from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.serializers import AuthTokenSerializer
 from django.shortcuts import get_object_or_404
 
 from .models import UserProfile, ChinaDoctor, Consultation
@@ -13,6 +15,20 @@ from .serializers import (
     AITriageRequestSerializer,
     AITriageResponseSerializer
 )
+
+
+class LoginView(APIView):
+    """Token-based login: exchange username/password for a token."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = AuthTokenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.validated_data['user']
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({'token': token.key}, status=status.HTTP_200_OK)
 
 
 class AITriageView(APIView):
@@ -26,7 +42,7 @@ class AITriageView(APIView):
     Request Body: {"symptoms": "description of symptoms"}
     Response: {"suggested_department": "...", "reason": "...", "confidence": 0.85}
     """
-    permission_classes = [AllowAny]  # Allow unauthenticated access for initial triage
+    permission_classes = [IsAuthenticated]  # Require auth token
     
     def post(self, request):
         """

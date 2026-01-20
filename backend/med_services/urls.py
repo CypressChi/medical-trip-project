@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    LoginView,
     AITriageView,
     UserProfileListCreateView,
     UserProfileDetailView,
@@ -12,6 +13,9 @@ from .views import (
 app_name = 'med_services'
 
 urlpatterns = [
+    # Auth token endpoint
+    path('auth/token/', LoginView.as_view(), name='auth-token'),
+
     # AI Triage endpoint
     path('triage/', AITriageView.as_view(), name='ai-triage'),
     
